@@ -5,6 +5,7 @@ metadata:
 spec:
   enforcementAction: deny
   match:
+    excludedNamespaces: ["argocd", "gatekeeper-system", "kube-system", "monitoring"]
     kinds:
     - apiGroups: ["apps"]
       kinds: ["Deployment"]

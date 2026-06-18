@@ -5,7 +5,7 @@ metadata:
 spec:
   enforcementAction: deny
   match:
-    excludedNamespaces: ["argocd", "argo-rollouts", "gatekeeper-system", "kube-system", "monitoring"]
+    excludedNamespaces: ["argocd", "argo-rollouts", "cosign-system", "external-secrets", "gatekeeper-system", "kube-system", "monitoring"]
     kinds:
     - apiGroups: ["apps"]
       kinds: ["Deployment"]

@@ -564,3 +564,78 @@ kubectl get pods -n monitoring
 Tác dụng:
 
 Đây là nhóm lệnh dùng để kiểm tra nhanh toàn bộ lab: ArgoCD, API, rollout, analysis, Gatekeeper và monitoring.
+
+## Bước 26. Lab buổi chiều: ESO
+
+Các file đã thêm:
+
+```text
+eso/secret-store.yaml
+eso/external-secret.yaml
+eso/secret-reader.yaml
+argocd/apps/eso.yaml
+argocd/apps/eso-config.yaml
+```
+
+Tác dụng:
+
+- `eso.yaml`: cài External Secrets Operator.
+- `eso-config.yaml`: sync cấu hình secret trong thư mục `eso/`.
+- `secret-store.yaml`: dùng provider `fake` để mô phỏng nguồn secret bên ngoài khi chạy minikube.
+- `external-secret.yaml`: tạo Kubernetes Secret tên `db-secret`.
+- `secret-reader.yaml`: pod mount secret qua volume để chứng minh secret đổi mà pod không restart.
+
+Kiểm tra:
+
+```powershell
+kubectl get pods -n external-secrets
+kubectl get secretstore,externalsecret -n demo
+kubectl get secret db-secret -n demo
+kubectl get pod -n demo -l app=secret-reader
+```
+
+## Bước 27. Lab buổi chiều: Trivy + Cosign
+
+Các file đã thêm:
+
+```text
+.github/workflows/build-push.yml
+argocd/apps/policy-controller.yaml
+argocd/apps/policies.yaml
+policies/cluster-image-policy.yaml
+policies/README.md
+signing/cosign.pub
+```
+
+Tác dụng:
+
+- Workflow build image, scan bằng Trivy, push lên GHCR, rồi ký image bằng Cosign keyless.
+- `policy-controller.yaml`: cài Sigstore Policy Controller.
+- `policies.yaml`: sync policy verify chữ ký.
+- `cluster-image-policy.yaml`: chỉ tin image `ghcr.io/nguyenha0112/w10-api` được ký bởi GitHub Actions của repo này.
+
+Lưu ý:
+
+Policy Controller chỉ enforce namespace có label:
+
+```powershell
+kubectl label namespace demo policy.sigstore.dev/include=true --overwrite
+```
+
+Chỉ gắn label này sau khi GitHub Actions đã build và ký image thành công.
+
+## Bước 28. Runbook và ADR
+
+Các file đã thêm:
+
+```text
+runbooks/secret-rotation.md
+runbooks/supply-chain.md
+runbooks/adr-cve-exception.md
+```
+
+Tác dụng:
+
+- `secret-rotation.md`: hướng dẫn rotate secret bằng ESO.
+- `supply-chain.md`: hướng dẫn kiểm tra Trivy, Cosign và admission verify.
+- `adr-cve-exception.md`: mẫu ngoại lệ CVE có thời hạn, không tắt scan toàn cục.

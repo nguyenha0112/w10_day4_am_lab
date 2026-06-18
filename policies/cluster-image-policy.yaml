@@ -1,0 +1,12 @@
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: require-signed-w10-api
+spec:
+  images:
+  - glob: ghcr.io/nguyenha0112/w10-api**
+  authorities:
+  - keyless:
+      identities:
+      - issuer: https://token.actions.githubusercontent.com
+        subjectRegExp: https://github.com/nguyenha0112/w10_day4_am_lab/.github/workflows/build-push.yml@refs/heads/main

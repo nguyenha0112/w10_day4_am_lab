@@ -1,0 +1,10 @@
+# This lab uses Cosign keyless signing with GitHub Actions OIDC.
+# There is no long-lived public/private key pair to commit.
+#
+# Verification is configured in policies/cluster-image-policy.yaml with:
+# - issuer: https://token.actions.githubusercontent.com
+# - subjectRegExp: https://github.com/nguyenha0112/w10_day4_am_lab/.github/workflows/build-push.yml@refs/heads/main
+#
+# If your instructor requires key-based signing instead, run:
+#   cosign generate-key-pair
+# Then commit the generated cosign.pub content here and store cosign.key plus COSIGN_PASSWORD in GitHub Secrets.

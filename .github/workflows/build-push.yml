@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - 'src/api/**'
+      - 'app-api/rollout.yaml'
       - '.github/workflows/build-push.yml'
   workflow_dispatch:
 

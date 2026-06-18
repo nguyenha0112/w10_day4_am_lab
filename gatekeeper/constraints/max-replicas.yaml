@@ -1,0 +1,14 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sMaxReplicas
+metadata:
+  name: max-replicas-five
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+    - apiGroups: ["apps"]
+      kinds: ["Deployment"]
+    - apiGroups: ["argoproj.io"]
+      kinds: ["Rollout"]
+  parameters:
+    max: 5

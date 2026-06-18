@@ -1,20 +1,19 @@
-# ArgoCD App: Deploy API Rollout + Service + ServiceMonitor
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: api
+  name: gatekeeper-templates
   namespace: argocd
   annotations:
-    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-wave: "1"
 spec:
   project: default
   source:
     repoURL: https://github.com/nguyenha0112/w10_day4_am_lab.git
-    path: app-api
+    path: gatekeeper/templates
     targetRevision: main
   destination:
     server: https://kubernetes.default.svc
-    namespace: demo
+    namespace: gatekeeper-system
   syncPolicy:
     automated:
       prune: true

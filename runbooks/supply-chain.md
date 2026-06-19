@@ -17,7 +17,7 @@ Workflow cần có các bước:
 - Build local image.
 - Trivy scan image.
 - Push image lên GHCR.
-- Cosign keyless sign image.
+- Cosign sign image with private key from GitHub Secrets.
 - Commit tag mới vào `app-api/rollout.yaml`.
 
 ## Bật admission verify
@@ -42,5 +42,18 @@ Kỳ vọng: admission reject vì image không match chữ ký tin cậy.
 kubectl get rollout api -n demo
 kubectl get pods -n demo -l app=api
 ```
+
+## Cosign key setup
+
+Repo commits only the public key:
+
+```text
+signing/cosign.pub
+```
+
+Do not commit the private key. Add these GitHub repository secrets:
+
+- `COSIGN_PRIVATE_KEY`: full content of local `signing/cosign.key`
+- `COSIGN_PASSWORD`: password used when generating the key pair
 
 Kỳ vọng: image được build từ workflow `build-push.yml` pass admission.

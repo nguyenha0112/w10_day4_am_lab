@@ -6,7 +6,9 @@ spec:
   images:
   - glob: ghcr.io/nguyenha0112/w10-api**
   authorities:
-  - keyless:
-      identities:
-      - issuer: https://token.actions.githubusercontent.com
-        subjectRegExp: https://github.com/nguyenha0112/w10_day4_am_lab/.github/workflows/build-push.yml@refs/heads/main
+  - key:
+      data: |
+        -----BEGIN PUBLIC KEY-----
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEvR3GOh2yO+JFithMsP0JBrkPFZEj
+        PBGe83RZxR3z5wzUX/zNgB2idJj4vew8j0Ej5Y+CCaF9YFxokuZsXvLDRA==
+        -----END PUBLIC KEY-----

@@ -581,9 +581,26 @@ Tác dụng:
 
 - `eso.yaml`: cài External Secrets Operator.
 - `eso-config.yaml`: sync cấu hình secret trong thư mục `eso/`.
-- `secret-store.yaml`: dùng provider `fake` để mô phỏng nguồn secret bên ngoài khi chạy minikube.
+- `secret-store.yaml`: dùng provider `aws` để đọc secret thật từ AWS Secrets Manager.
 - `external-secret.yaml`: tạo Kubernetes Secret tên `db-secret`.
 - `secret-reader.yaml`: pod mount secret qua volume để chứng minh secret đổi mà pod không restart.
+
+Trước khi sync ESO, cần tạo AWS secret thật:
+
+```text
+Region: ap-southeast-1
+Secret name: /w10/demo/db-password
+```
+
+Và tạo Kubernetes Secret chứa AWS credential:
+
+```powershell
+kubectl create secret generic aws-credentials -n demo `
+  --from-literal=access-key-id="YOUR_AWS_ACCESS_KEY_ID" `
+  --from-literal=secret-access-key="YOUR_AWS_SECRET_ACCESS_KEY"
+```
+
+Không commit AWS credential vào Git.
 
 Kiểm tra:
 
@@ -609,10 +626,19 @@ signing/cosign.pub
 
 Tác dụng:
 
-- Workflow build image, scan bằng Trivy, push lên GHCR, rồi ký image bằng Cosign keyless.
+- Workflow build image, scan bằng Trivy, push lên GHCR, rồi ký image bằng Cosign key pair.
 - `policy-controller.yaml`: cài Sigstore Policy Controller.
 - `policies.yaml`: sync policy verify chữ ký.
-- `cluster-image-policy.yaml`: chỉ tin image `ghcr.io/nguyenha0112/w10-api` được ký bởi GitHub Actions của repo này.
+- `cluster-image-policy.yaml`: chỉ tin image `ghcr.io/nguyenha0112/w10-api` được ký bằng private key tương ứng với `signing/cosign.pub`.
+
+GitHub repo cần có secrets:
+
+```text
+COSIGN_PRIVATE_KEY = nội dung file signing/cosign.key
+COSIGN_PASSWORD    = password lúc generate key pair
+```
+
+Không commit `signing/cosign.key`.
 
 Lưu ý:
 
@@ -639,3 +665,35 @@ Tác dụng:
 - `secret-rotation.md`: hướng dẫn rotate secret bằng ESO.
 - `supply-chain.md`: hướng dẫn kiểm tra Trivy, Cosign và admission verify.
 - `adr-cve-exception.md`: mẫu ngoại lệ CVE có thời hạn, không tắt scan toàn cục.
+
+## Bước 29. Challenge payments tenant
+
+Các file đã thêm:
+
+```text
+tenants/payments/
+apps/payments/
+argocd/apps/payments.yaml
+argocd/apps/payments-app.yaml
+```
+
+Tác dụng:
+
+- Tạo namespace `payments` riêng.
+- Gán label `policy.sigstore.dev/include=true` để policy verify image cũ tự áp dụng cho team mới.
+- Tạo RBAC cho user `payments-dev`, chỉ thao tác workload trong namespace `payments`.
+- Không cấp quyền đọc `secrets` hoặc sửa `rolebindings`.
+- Tạo `ResourceQuota` và `LimitRange`.
+- Tạo `NetworkPolicy` default-deny ingress và restrict egress chỉ cùng namespace + DNS.
+- Deploy app mẫu `payments-api` qua GitOps.
+
+Kiểm tra:
+
+```powershell
+kubectl auth can-i create deploy -n payments --as payments-dev
+kubectl auth can-i create deploy -n demo --as payments-dev
+kubectl auth can-i get secrets -n payments --as payments-dev
+kubectl auth can-i create rolebindings -n payments --as payments-dev
+kubectl get resourcequota,limitrange,networkpolicy -n payments
+kubectl get deploy,svc -n payments
+```

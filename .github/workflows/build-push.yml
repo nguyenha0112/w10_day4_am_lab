@@ -21,7 +21,6 @@ jobs:
     permissions:
       contents: write
       packages: write
-      id-token: write
       security-events: write
 
     steps:
@@ -90,12 +89,14 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Sign image tags with Cosign keyless
+      - name: Sign image tags with Cosign key
         env:
           COSIGN_YES: "true"
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           while IFS= read -r tag; do
-            cosign sign "$tag"
+            cosign sign --key env://COSIGN_PRIVATE_KEY "$tag"
           done <<< "${{ steps.meta.outputs.tags }}"
 
       - name: Update rollout.yaml with new version

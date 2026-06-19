@@ -5,7 +5,7 @@ metadata:
   namespace: demo
 rules:
 - apiGroups: [""]
-  resources: ["pods", "pods/log", "services", "configmaps", "secrets"]
+  resources: ["pods", "pods/log", "services", "configmaps"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets"]

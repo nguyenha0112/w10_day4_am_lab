@@ -1,698 +1,122 @@
-﻿# Tổng Hợp W10 Lab: RBAC, Admission, Secrets, Supply Chain
+# Tổng hợp W10 Lab: RBAC, Admission, Secrets, Supply Chain, Multi-tenant
 
-File này giải thích toàn bộ repo lab W10: cấu trúc thư mục, tác dụng từng file, tuần này đã làm thêm gì, và kiến thức trong hai slide buổi sáng/buổi chiều.
+File này dùng để ôn tập và giải thích repo W10. Nội dung bám theo 2 slide:
 
-## 0. Kiến thức trong slide cần nắm
+- Buổi sáng: RBAC + Admission Policy.
+- Buổi chiều: Secrets + Supply Chain + Platform Integration.
+- Challenge: onboard team `payments` theo hướng multi-tenant an toàn.
 
-Phần này chỉ tóm tắt các ý chính xuất hiện trong hai slide: buổi sáng là RBAC + Admission Policy, buổi chiều là Secrets + Supply Chain.
+Project nằm trong thư mục `temp/`.
 
-### RBAC
+## 1. Kết luận trạng thái
+
+Repo hiện đã đủ các phần chính:
+
+| Nhóm yêu cầu | Trạng thái | Tác dụng | File/thư mục |
+|---|---:|---|---|
+| GitOps App of Apps | Đủ | Quản lý toàn bộ platform từ Git, ArgoCD tự sync các app con vào cluster | `argocd/root.yaml`, `argocd/apps/*.yaml` |
+| RBAC 3 user | Đủ | Phân quyền ai được làm gì; giới hạn `alice`, `bob`, `carol` theo vai trò | `rbac/roles.yaml`, `rbac/rolebindings.yaml` |
+| Gatekeeper Admission | Đủ | Chặn manifest xấu trước khi vào cluster, ví dụ `:latest`, thiếu limits, chạy root | `gatekeeper/templates/`, `gatekeeper/constraints/` |
+| ESO secret rotation | Đủ, dùng AWS Secrets Manager | Sync secret từ AWS vào Kubernetes Secret, chứng minh rotate không cần restart pod | `eso/`, `argocd/apps/eso*.yaml` |
+| Trivy scan | Đủ | Scan CVE trong image ở CI, fail pipeline nếu có lỗi HIGH/CRITICAL | `.github/workflows/build-push.yml` |
+| Cosign signing | Đủ, dùng key-pair | Ký image sau khi build/scan để chứng minh image đến từ pipeline tin cậy | `.github/workflows/build-push.yml`, `signing/cosign.pub` |
+| Policy Controller verify image | Đủ | Admission kiểm tra chữ ký image, reject image chưa ký hoặc không đúng public key | `argocd/apps/policy-controller.yaml`, `policies/cluster-image-policy.yaml` |
+| Runbook/ADR | Đủ | Ghi cách vận hành, rotate secret, kiểm tra supply chain, xử lý ngoại lệ CVE có thời hạn | `runbooks/*.md`, `policies/README.md` |
+| Challenge `payments` | Đủ | Onboard team mới vào namespace riêng, cô lập bằng RBAC, quota, limits, network policy và GitOps app riêng | `tenants/payments/`, `apps/payments/`, `argocd/apps/payments*.yaml` |
+
+## 2. Phương án thay thế cần báo rõ
+
+Có 1 điểm cần báo rõ khi trình bày:
+
+1. Cosign dùng key-pair, không dùng keyless
+
+Project hiện dùng Cosign key-pair:
+
+- Public key commit trong `signing/cosign.pub`.
+- Private key nằm local ở `signing/cosign.key` và bị `.gitignore`.
+- GitHub Actions cần secrets:
+
+```text
+COSIGN_PRIVATE_KEY = nội dung file signing/cosign.key
+COSIGN_PASSWORD    = password lúc generate key pair
+```
+
+Cluster verify image bằng public key trong `policies/cluster-image-policy.yaml`.
+
+## 3. Kiểm tra tĩnh đã chạy
+
+Đã chạy dry-run các manifest chính:
+
+```powershell
+kubectl apply --dry-run=client --validate=false `
+  -f rbac `
+  -f gatekeeper/templates `
+  -f gatekeeper/constraints `
+  -f eso `
+  -f policies `
+  -f tenants/payments `
+  -f apps/payments `
+  -f argocd/apps/payments.yaml `
+  -f argocd/apps/payments-app.yaml
+```
+
+Kết quả: các resource parse được và dry-run thành công, gồm RBAC, Gatekeeper, ESO, ClusterImagePolicy, namespace/app `payments`.
+
+Ngoài ra đã kiểm tra các cấu hình Cosign chính hiện dùng key-pair và không còn cấu hình OIDC/keyless cũ trong workflow hoặc policy.
+
+## 4. GitOps và ArgoCD
+
+GitOps nghĩa là Git là nguồn sự thật. Bạn sửa manifest, commit, push; ArgoCD đọc Git và sync vào cluster.
+
+File chính:
+
+- `argocd/root.yaml`: root app theo pattern App of Apps.
+- `argocd/apps/*.yaml`: các child app.
+
+Các child app quan trọng:
+
+| App | Tác dụng |
+|---|---|
+| `app-common.yaml` | Tạo namespace `demo` |
+| `app-api.yaml` | Deploy API Rollout/Service/ServiceMonitor |
+| `app-analysis.yaml` | Deploy AnalysisTemplate |
+| `app-alert.yaml` | Deploy PrometheusRule |
+| `rbac.yaml` | Sync RBAC |
+| `gatekeeper.yaml` | Cài Gatekeeper |
+| `gatekeeper-templates.yaml` | Sync ConstraintTemplate |
+| `gatekeeper-constraints.yaml` | Sync Constraint |
+| `eso.yaml` | Cài External Secrets Operator |
+| `eso-config.yaml` | Sync SecretStore/ExternalSecret/secret-reader |
+| `policy-controller.yaml` | Cài Sigstore Policy Controller |
+| `policies.yaml` | Sync ClusterImagePolicy |
+| `payments.yaml` | Sync tenant `payments` |
+| `payments-app.yaml` | Sync app mẫu của team `payments` |
+
+## 5. RBAC
 
 RBAC trả lời câu hỏi:
 
 ```text
-Ai được làm gì trong cluster?
+Ai được làm gì?
 ```
 
-Trong lab:
+File:
 
-- `alice` là developer, chỉ được thao tác workload trong namespace `demo`.
-- `bob` là SRE, được xem và thao tác pod ở toàn cluster.
-- `carol` là viewer, chỉ được đọc tài nguyên.
+- `rbac/roles.yaml`
+- `rbac/rolebindings.yaml`
+- `argocd/apps/rbac.yaml`
 
-Nếu không có RBAC:
+### Vai trò
 
-- User có thể có quyền quá rộng.
-- Dễ xóa nhầm namespace, sửa secret, xóa node.
-- Cluster thành kiểu "ai cũng admin".
+| User | Role | Phạm vi | Ý nghĩa |
+|---|---|---|---|
+| `alice` | `developer` | Namespace `demo` | Dev thao tác workload |
+| `bob` | `sre` | Toàn cluster | SRE vận hành pod/deployment/rollout |
+| `carol` | `viewer` | Toàn cluster | Chỉ đọc |
 
-File liên quan:
+Điểm đã chỉnh: `developer` không còn quyền CRUD `secrets`. Điều này đúng hơn với least privilege.
 
-```text
-rbac/roles.yaml
-rbac/rolebindings.yaml
-argocd/apps/rbac.yaml
-```
-
-### Admission Policy
-
-Admission Policy trả lời câu hỏi:
-
-```text
-Manifest này có hợp lệ không?
-```
-
-RBAC kiểm tra "ai được làm", còn Admission kiểm tra "thứ được tạo có an toàn không".
-
-Trong lab dùng Gatekeeper để chặn:
-
-- Image tag `:latest`.
-- Container thiếu `resources.limits`.
-- Container chạy root `runAsUser: 0`.
-- Pod dùng `hostNetwork: true`.
-- Deployment/Rollout có `replicas > 5`.
-
-Nếu không có Admission Policy:
-
-- User có quyền create Deployment vẫn có thể tạo manifest nguy hiểm.
-- Pod có thể chạy không giới hạn tài nguyên.
-- Image không rõ version vẫn được deploy.
-
-File liên quan:
-
-```text
-gatekeeper/templates/
-gatekeeper/constraints/
-argocd/apps/gatekeeper.yaml
-argocd/apps/gatekeeper-templates.yaml
-argocd/apps/gatekeeper-constraints.yaml
-```
-
-### Gatekeeper
-
-Gatekeeper là admission controller dùng policy-as-code.
-
-Trong Gatekeeper có hai phần:
-
-```text
-ConstraintTemplate = định nghĩa logic policy
-Constraint         = bật policy đó lên trong cluster
-```
-
-Ví dụ:
-
-```text
-gatekeeper/templates/k8srequiredcontainerlimits.yaml
-gatekeeper/constraints/require-container-limits.yaml
-```
-
-Ý nghĩa:
-
-- Template nói luật kiểm tra như thế nào.
-- Constraint nói áp luật đó vào cluster với chế độ `deny`.
-
-### Secrets Rotation
-
-Slide buổi chiều nhấn mạnh: không nên để password/secret plaintext trong Git.
-
-Giải pháp là External Secrets Operator, viết tắt là ESO.
-
-ESO làm nhiệm vụ:
-
-```text
-Nguồn secret bên ngoài -> ESO -> Kubernetes Secret
-```
-
-Trong môi trường thật, nguồn secret có thể là AWS Secrets Manager. Trong lab minikube, repo dùng fake provider để mô phỏng.
-
-Nếu không có ESO:
-
-- Dễ commit password vào Git.
-- Rotate secret phải làm thủ công.
-- Khó chứng minh secret đổi mà pod không restart.
-
-File liên quan:
-
-```text
-eso/secret-store.yaml
-eso/external-secret.yaml
-eso/secret-reader.yaml
-argocd/apps/eso.yaml
-argocd/apps/eso-config.yaml
-```
-
-### Mount Secret bằng volume
-
-Slide nhấn mạnh khác biệt giữa đọc secret qua env và volume.
-
-- Nếu app đọc secret qua env, pod thường cần restart để thấy giá trị mới.
-- Nếu app đọc secret qua file volume, Kubernetes có thể cập nhật nội dung file mà pod không cần restart.
-
-Trong lab:
-
-```text
-eso/secret-reader.yaml
-```
-
-Pod `secret-reader` mount secret `db-secret` vào file để kiểm tra secret rotate.
-
-### Supply Chain Security
-
-Supply chain security trong slide gồm 3 bước:
-
-```text
-Trivy scan -> Cosign sign -> Admission verify
-```
-
-Mục tiêu:
-
-- Image phải được scan CVE trước khi deploy.
-- Image phải được ký để biết nó đến từ pipeline tin cậy.
-- Cluster chỉ cho chạy image đã ký.
-
-Nếu không có supply chain security:
-
-- Image có CVE HIGH/CRITICAL vẫn có thể chạy.
-- Không biết image do ai build.
-- Image chưa ký vẫn có thể được deploy.
-
-### Trivy
-
-Trivy dùng để scan CVE trong container image.
-
-Trong lab:
-
-- CI fail nếu có CVE `HIGH` hoặc `CRITICAL`.
-- Kết quả scan được upload dạng SARIF.
-
-File liên quan:
-
-```text
-.github/workflows/build-push.yml
-```
-
-### Cosign
-
-Cosign dùng để ký image.
-
-Trong lab dùng Cosign keyless với GitHub Actions OIDC, nghĩa là không cần commit private key vào repo.
-
-Ý nghĩa:
-
-- Image được ký bởi workflow GitHub Actions.
-- Signature lưu cùng registry.
-- Policy Controller có thể verify chữ ký khi deploy.
-
-File liên quan:
-
-```text
-.github/workflows/build-push.yml
-signing/cosign.pub
-```
-
-### Sigstore Policy Controller
-
-Policy Controller là admission controller để verify chữ ký image.
-
-Trong lab:
-
-- Cài bằng ArgoCD app `policy-controller`.
-- Policy nằm trong `policies/cluster-image-policy.yaml`.
-- Chỉ enforce namespace có label:
-
-```powershell
-kubectl label namespace demo policy.sigstore.dev/include=true --overwrite
-```
-
-Lưu ý: chỉ bật label sau khi image đã được ký, nếu bật quá sớm app có thể bị reject ở lần rollout tiếp theo.
-
-File liên quan:
-
-```text
-argocd/apps/policy-controller.yaml
-argocd/apps/policies.yaml
-policies/cluster-image-policy.yaml
-```
-
-### ArgoCD và GitOps
-
-ArgoCD đọc manifest từ GitHub rồi apply vào cluster.
-
-Ý nghĩa:
-
-```text
-GitHub là nguồn sự thật
-ArgoCD kéo thay đổi từ GitHub
-Cluster chạy theo trạng thái trong Git
-```
-
-Nếu không có ArgoCD:
-
-- Phải `kubectl apply` thủ công.
-- Dễ lệch giữa Git và cluster.
-- Khó kiểm soát lịch sử thay đổi.
-
-File liên quan:
-
-```text
-argocd/root.yaml
-argocd/apps/*.yaml
-```
-
-### Ý nghĩa các namespace trong lab
-
-```text
-argocd
-```
-
-Chứa ArgoCD. Dùng để sync manifest từ GitHub vào cluster.
-
-```text
-demo
-```
-
-Chứa workload chính của bài: API, Rollout, Service, ServiceMonitor, ESO secret demo.
-
-```text
-monitoring
-```
-
-Chứa Prometheus, Alertmanager, Grafana. Dùng để thu metrics và gửi alert.
-
-```text
-argo-rollouts
-```
-
-Chứa Argo Rollouts controller. Dùng để điều khiển Rollout, canary và AnalysisRun.
-
-```text
-gatekeeper-system
-```
-
-Chứa Gatekeeper controller. Dùng để enforce admission policy.
-
-```text
-external-secrets
-```
-
-Chứa External Secrets Operator. Dùng để sync secret từ nguồn ngoài vào Kubernetes Secret.
-
-```text
-cosign-system
-```
-
-Chứa Sigstore Policy Controller. Dùng để verify chữ ký image.
-
-```text
-kube-system
-```
-
-Namespace hệ thống của Kubernetes, chứa các thành phần lõi như CoreDNS.
-
-```text
-default
-```
-
-Namespace mặc định nếu không chỉ định `-n`. Trong lab này không dùng để deploy workload chính.
-## 1. Repo này dùng để làm gì?
-
-Repo này là một repo GitOps cho Kubernetes.
-
-Ý tưởng chính:
-
-```text
-Code/YAML nằm trên GitHub
-        ↓
-ArgoCD đọc repo
-        ↓
-ArgoCD apply YAML vào Kubernetes
-        ↓
-Cluster tạo resource thật: Pod, Service, RBAC, Gatekeeper policy, ESO, monitoring...
-```
-
-GitHub là nơi lưu "bản thiết kế". Kubernetes là nơi chạy "đồ thật".
-
-## 2. Trạng thái yêu cầu hiện tại
-
-Về mặt file trong repo, các yêu cầu chính của hai slide đã có:
-
-- Buổi sáng:
-  - RBAC 3 vai trò: `alice`, `bob`, `carol`.
-  - Gatekeeper templates và constraints.
-  - 4 admission policy: cấm `latest`, bắt buộc limits, cấm root, cấm hostNetwork.
-  - Custom policy: chặn replicas lớn hơn 5.
-
-- Buổi chiều:
-  - ESO operator app.
-  - ESO config dùng fake provider để chạy được trên minikube không cần AWS thật.
-  - Secret reader pod để chứng minh mount secret bằng volume.
-  - Trivy scan trong GitHub Actions.
-  - Cosign keyless signing trong GitHub Actions.
-  - Sigstore Policy Controller app.
-  - ClusterImagePolicy verify image đã ký.
-  - Runbooks và ADR cho vận hành.
-
-Lưu ý runtime:
-
-Ở lần kiểm tra hiện tại, Docker Desktop chưa chạy nên `kubectl` không kết nối được minikube. Lỗi đang thấy là:
-
-```text
-dial tcp 127.0.0.1:<port>: connectex: No connection could be made
-dockerDesktopLinuxEngine: The system cannot find the file specified
-```
-
-Nghĩa là file repo đủ, nhưng muốn kiểm tra ArgoCD/Kubernetes thật thì cần bật Docker Desktop rồi chạy:
-
-```powershell
-minikube start
-minikube update-context
-kubectl get nodes
-kubectl get applications -n argocd
-```
-
-## 3. Cấu trúc thư mục tổng quan
-
-```text
-.
-├── .github/workflows/        # CI/CD GitHub Actions
-├── app-alert/                # Alert rule và hướng dẫn email alert
-├── app-analysis/             # AnalysisTemplate cho Argo Rollouts
-├── app-api/                  # Rollout, Service, ServiceMonitor của API
-├── app-common/               # Namespace dùng chung
-├── argocd/                   # Root app và các child app ArgoCD
-├── eso/                      # SecretStore, ExternalSecret, pod đọc secret
-├── gatekeeper/               # ConstraintTemplate và Constraint admission policy
-├── policies/                 # Sigstore ClusterImagePolicy
-├── rbac/                     # Role, ClusterRole, RoleBinding
-├── runbooks/                 # Hướng dẫn vận hành và ADR
-├── signing/                  # Ghi chú/public key signing
-├── src/api/                  # Source Flask API và Dockerfile
-├── README.md                 # README gốc
-├── README_LAB_STEPS.md       # Các bước làm lab
-└── TONG_HOP_W10_LAB.md       # File tổng hợp này
-```
-
-## 4. Nhóm ArgoCD
-
-### `argocd/root.yaml`
-
-Đây là app mẹ theo mô hình App of Apps.
-
-Nó đọc:
-
-```text
-argocd/apps
-```
-
-Tác dụng:
-
-- Tạo các app con.
-- Mỗi app con quản lý một phần platform.
-- Khi push GitHub, ArgoCD tự sync lại.
-
-Ví dụ root app tạo ra các app:
-
-```text
-common
-api
-analysis
-alert
-rbac
-gatekeeper
-external-secrets
-eso-config
-policy-controller
-image-policies
-```
-
-### `argocd/apps/app-common.yaml`
-
-Trỏ ArgoCD tới thư mục:
-
-```text
-app-common/
-```
-
-Tác dụng: tạo namespace `demo`.
-
-### `argocd/apps/app-api.yaml`
-
-Trỏ ArgoCD tới:
-
-```text
-app-api/
-```
-
-Tác dụng: deploy API bằng Rollout, Service, ServiceMonitor.
-
-### `argocd/apps/app-analysis.yaml`
-
-Trỏ ArgoCD tới:
-
-```text
-app-analysis/
-```
-
-Tác dụng: deploy AnalysisTemplate để Argo Rollouts dùng khi canary.
-
-### `argocd/apps/app-alert.yaml`
-
-Trỏ ArgoCD tới:
-
-```text
-app-alert/
-```
-
-Tác dụng: deploy PrometheusRule cho cảnh báo.
-
-### `argocd/apps/k8s-prometheus.yaml`
-
-Cài kube-prometheus-stack bằng Helm.
-
-Tác dụng:
-
-- Prometheus: thu metrics.
-- Alertmanager: gửi alert qua email.
-- Grafana: dashboard.
-- CRD `ServiceMonitor` và `PrometheusRule`.
-
-Trong file này email đã đổi sang:
-
-```text
-nguyen229396@gmail.com
-```
-
-Secret email thật không commit vào Git, mà tạo bằng:
-
-```powershell
-kubectl create secret generic alertmanager-email -n monitoring --from-literal=password="APP_PASSWORD"
-```
-
-### `argocd/apps/k8s-rollout.yaml`
-
-Cài Argo Rollouts controller.
-
-Tác dụng:
-
-- Kubernetes mặc định chỉ có Deployment.
-- Argo Rollouts thêm resource `Rollout`, `AnalysisRun`, `AnalysisTemplate`.
-- Dùng để canary deploy API.
-
-### `argocd/apps/rbac.yaml`
-
-Trỏ ArgoCD tới:
-
-```text
-rbac/
-```
-
-Tác dụng: sync Role, ClusterRole, RoleBinding.
-
-### `argocd/apps/gatekeeper.yaml`
-
-Cài OPA Gatekeeper controller bằng Helm.
-
-Tác dụng: bật admission webhook để chặn manifest xấu trước khi vào cluster.
-
-### `argocd/apps/gatekeeper-templates.yaml`
-
-Trỏ ArgoCD tới:
-
-```text
-gatekeeper/templates/
-```
-
-Tác dụng: deploy ConstraintTemplate, tức là khuôn logic policy.
-
-### `argocd/apps/gatekeeper-constraints.yaml`
-
-Trỏ ArgoCD tới:
-
-```text
-gatekeeper/constraints/
-```
-
-Tác dụng: bật policy thật từ các template.
-
-### `argocd/apps/eso.yaml`
-
-Cài External Secrets Operator bằng Helm.
-
-Tác dụng:
-
-- Tạo CRD `SecretStore`.
-- Tạo CRD `ExternalSecret`.
-- Chạy controller để sync secret từ nguồn ngoài vào Kubernetes Secret.
-
-### `argocd/apps/eso-config.yaml`
-
-Trỏ ArgoCD tới:
-
-```text
-eso/
-```
-
-Tác dụng: sync cấu hình SecretStore, ExternalSecret và pod đọc secret.
-
-### `argocd/apps/policy-controller.yaml`
-
-Cài Sigstore Policy Controller bằng Helm.
-
-Tác dụng:
-
-- Tạo CRD `ClusterImagePolicy`.
-- Tạo admission controller verify chữ ký image.
-- Chỉ enforce namespace có label `policy.sigstore.dev/include=true`.
-
-### `argocd/apps/policies.yaml`
-
-Trỏ ArgoCD tới:
-
-```text
-policies/
-```
-
-Tác dụng: sync ClusterImagePolicy.
-
-## 5. Nhóm app API
-
-### `src/api/app.py`
-
-Source code Flask API.
-
-Endpoint chính:
-
-```text
-/        # trả JSON ok/version, có thể inject lỗi bằng ERROR_RATE
-/healthz # health check
-/metrics # Prometheus metrics do prometheus-flask-exporter tạo
-```
-
-Tác dụng trong lab:
-
-- Có app thật để deploy.
-- Có metrics để Prometheus scrape.
-- Có `ERROR_RATE` để test canary/alert.
-
-### `src/api/Dockerfile`
-
-Mô tả cách build image API.
-
-Tác dụng:
-
-- GitHub Actions dùng Dockerfile này để build image.
-- Image được push lên GHCR.
-
-### `app-api/rollout.yaml`
-
-Deploy API bằng Argo Rollouts.
-
-Phần image:
-
-```yaml
-image: ghcr.io/nguyenha0112/w10-api:0.0.1
-```
-
-Tác dụng:
-
-- Chạy API bằng custom resource `Rollout`.
-- Có canary strategy: 10%, 50%, 100%.
-- Dùng `AnalysisTemplate` để kiểm tra metric trong lúc rollout.
-
-Lưu ý:
-
-Nếu người khác bị `InvalidImageName`, kiểm tra dòng `image:` trong file này. Format đúng là:
-
-```text
-ghcr.io/<github-user>/<image-name>:<tag>
-```
-
-### `app-api/service.yaml`
-
-Tạo Service tên `api`.
-
-Tác dụng:
-
-- Expose pod API trong cluster.
-- Service port `80` trỏ tới container port `8080`.
-- Prometheus cần Service này để scrape metrics.
-
-### `app-api/servicemonitor.yaml`
-
-Tạo ServiceMonitor cho Prometheus.
-
-Tác dụng:
-
-- Nói cho Prometheus scrape `/metrics` của Service `api`.
-- Nếu thiếu CRD ServiceMonitor, app API có thể sync fail cho tới khi kube-prometheus-stack cài xong.
-
-## 6. Nhóm analysis và alert
-
-### `app-analysis/analysis-template.yaml`
-
-Định nghĩa AnalysisTemplate.
-
-Tác dụng:
-
-- Argo Rollouts dùng nó để query Prometheus.
-- Nếu metric tốt thì rollout tiếp.
-- Nếu metric xấu thì rollout fail/rollback.
-
-Lưu ý:
-
-`kubectl get analysisrun -n demo` có thể chưa có gì ở lần deploy đầu. AnalysisRun thường sinh ra khi có lần update/canary tiếp theo, không nhất thiết sinh ở initial deploy.
-
-### `app-alert/prometheus-rules.yaml`
-
-Tạo PrometheusRule.
-
-Tác dụng:
-
-- Định nghĩa alert khi API error rate cao hoặc SLO thấp.
-- Alert sẽ đi qua Alertmanager.
-
-### `app-alert/email-secret.yaml.example`
-
-File mẫu secret email.
-
-Tác dụng:
-
-- Cho biết Secret thật cần key `password`.
-- File thật không commit lên Git.
-
-## 7. Nhóm RBAC
-
-### `rbac/roles.yaml`
-
-Định nghĩa quyền.
-
-Có 3 vai trò:
-
-```text
-developer
-sre
-viewer
-```
-
-Tác dụng:
-
-- `developer`: thao tác workload trong namespace `demo`.
-- `sre`: xem và thao tác pod ở toàn cluster.
-- `viewer`: chỉ đọc tài nguyên.
-
-### `rbac/rolebindings.yaml`
-
-Gán user vào quyền.
-
-Mapping:
-
-```text
-alice -> developer
-bob   -> sre
-carol -> viewer
-```
-
-Test theo slide:
+Kiểm tra:
 
 ```powershell
 kubectl auth can-i create deploy -n demo --as alice
@@ -710,82 +134,43 @@ yes
 no
 ```
 
-Ý nghĩa kiến thức:
-
-- RBAC trả lời câu hỏi: "Ai được làm gì?"
-- `Role` bó trong namespace.
-- `ClusterRole` áp dụng toàn cluster.
-- `RoleBinding`/`ClusterRoleBinding` gán quyền cho user.
-
-## 8. Nhóm Gatekeeper Admission Policy
+## 6. Gatekeeper Admission Policy
 
 Gatekeeper trả lời câu hỏi:
 
 ```text
-Manifest có hợp lệ không?
+Manifest này có hợp lệ không?
 ```
 
-Khác với RBAC:
+RBAC kiểm tra "ai được làm", Gatekeeper kiểm tra "thứ được tạo có an toàn không".
 
-- RBAC kiểm "ai".
-- Admission policy kiểm "cái gì".
+File:
 
-### `gatekeeper/templates/k8sdisallowlatesttag.yaml`
+- `gatekeeper/templates/*.yaml`
+- `gatekeeper/constraints/*.yaml`
+- `argocd/apps/gatekeeper.yaml`
+- `argocd/apps/gatekeeper-templates.yaml`
+- `argocd/apps/gatekeeper-constraints.yaml`
 
-Template logic cấm image tag `:latest`.
+### Luật đang có
 
-Tác dụng: tránh deploy image không cố định version.
+| Policy | Tác dụng |
+|---|---|
+| `K8sDisallowLatestTag` | Cấm image `:latest` hoặc image không có tag rõ ràng |
+| `K8sRequiredContainerLimits` | Bắt buộc `resources.limits.cpu` và `resources.limits.memory` |
+| `K8sDisallowRootUser` | Cấm `runAsUser: 0` |
+| `K8sDisallowHostNetwork` | Cấm `hostNetwork: true` |
+| `K8sMaxReplicas` | Chặn Deployment/Rollout nếu `replicas > 5` |
 
-### `gatekeeper/templates/k8srequiredcontainerlimits.yaml`
-
-Template logic bắt container có:
-
-```text
-resources.limits.cpu
-resources.limits.memory
-```
-
-Tác dụng: tránh pod ăn hết tài nguyên node.
-
-### `gatekeeper/templates/k8sdisallowrootuser.yaml`
-
-Template logic cấm:
+Các constraint đều đang dùng:
 
 ```yaml
-runAsUser: 0
+enforcementAction: deny
 ```
 
-Tác dụng: tránh container chạy quyền root.
+Nghĩa là vi phạm sẽ bị reject thật.
 
-### `gatekeeper/templates/k8sdisallowhostnetwork.yaml`
-
-Template logic cấm:
-
-```yaml
-hostNetwork: true
-```
-
-Tác dụng: tránh pod dùng network namespace của node.
-
-### `gatekeeper/templates/k8smaxreplicas.yaml`
-
-Custom template.
-
-Tác dụng: chặn Deployment/Rollout nếu `replicas > 5`.
-
-### `gatekeeper/constraints/*.yaml`
-
-Các file này bật template thành policy thật.
-
-Ví dụ:
-
-```text
-require-container-limits.yaml
-```
-
-dùng template `K8sRequiredContainerLimits` để enforce bắt buộc limits.
-
-Các constraints có exclude namespace hạ tầng:
+Các namespace hệ thống được exclude:
 
 ```text
 argocd
@@ -797,368 +182,260 @@ kube-system
 monitoring
 ```
 
-Lý do:
+Lý do: không để policy làm hỏng controller/hạ tầng.
 
-Policy nên chặn workload app như `demo`, nhưng không nên làm chết controller hệ thống như ArgoCD, Prometheus, ESO, Policy Controller.
+## 7. API, Rollout, Monitoring
 
-## 9. Nhóm ESO
+File chính:
 
-ESO là External Secrets Operator.
+- `src/api/app.py`
+- `src/api/Dockerfile`
+- `app-api/rollout.yaml`
+- `app-api/service.yaml`
+- `app-api/servicemonitor.yaml`
+- `app-analysis/analysis-template.yaml`
+- `app-alert/prometheus-rules.yaml`
 
-Kiến thức slide:
+API được deploy bằng Argo Rollouts:
 
-- Không commit secret thật vào Git.
-- Secret lưu ở nguồn ngoài như AWS Secrets Manager.
-- ESO sync secret từ nguồn ngoài vào Kubernetes Secret.
-- App mount Secret qua volume thì nội dung file có thể update mà pod không restart.
+- Canary: `10% -> 50% -> 100%`.
+- Có AnalysisTemplate để query Prometheus.
+- Có ServiceMonitor để Prometheus scrape `/metrics`.
 
-Trong lab minikube, repo dùng provider `fake` để không cần AWS thật.
+App API hiện hợp lệ với Gatekeeper:
 
-### `eso/secret-store.yaml`
+- Image có tag cụ thể: `ghcr.io/nguyenha0112/w10-api:0.0.1`.
+- Có CPU/memory limits.
+- Không chạy root.
+- Không bật hostNetwork.
+- `replicas: 4`, nhỏ hơn max `5`.
 
-Tạo `SecretStore` tên `fake-store`.
+## 8. ESO Secret Rotation
 
-Tác dụng:
+ESO dùng để không commit secret thật vào Git. Project hiện dùng AWS Secrets Manager thật.
 
-- Định nghĩa nguồn secret giả lập.
-- Có key `/w10/demo/db-password`.
-- Value ban đầu là `initial-db-password`.
+File:
 
-### `eso/external-secret.yaml`
+- `argocd/apps/eso.yaml`
+- `argocd/apps/eso-config.yaml`
+- `eso/secret-store.yaml`
+- `eso/external-secret.yaml`
+- `eso/secret-reader.yaml`
 
-Tạo `ExternalSecret` tên `db-secret`.
+Flow:
 
-Tác dụng:
+```text
+AWS Secrets Manager -> SecretStore aws-store -> ExternalSecret -> Kubernetes Secret db-secret -> pod secret-reader mount volume
+```
 
-- Nói ESO lấy key `/w10/demo/db-password`.
-- Tạo Kubernetes Secret tên `db-secret`.
-- Refresh mỗi `30s`.
+Chi tiết:
 
-### `eso/secret-reader.yaml`
+- `SecretStore` tên `aws-store`.
+- AWS region: `ap-southeast-1`.
+- AWS Secrets Manager key: `/w10/demo/db-password`.
+- `ExternalSecret` tạo Kubernetes Secret tên `db-secret`.
+- `refreshInterval: 30s`, đạt yêu cầu rotate dưới 60 giây.
+- `secret-reader` mount Secret vào `/etc/db` và đọc file mỗi 10 giây.
 
-Tạo Deployment `secret-reader`.
+Trước khi ESO sync được, cần tạo Kubernetes Secret chứa AWS credential:
 
-Tác dụng:
+```powershell
+kubectl create secret generic aws-credentials -n demo `
+  --from-literal=access-key-id="YOUR_AWS_ACCESS_KEY_ID" `
+  --from-literal=secret-access-key="YOUR_AWS_SECRET_ACCESS_KEY"
+```
 
-- Mount Secret `db-secret` vào `/etc/db/password`.
-- In nội dung secret mỗi 10 giây.
-- Dùng để chứng minh secret đổi mà pod không restart.
+Không commit AWS credential vào Git.
 
-Test ESO:
+Kiểm tra:
 
 ```powershell
 kubectl get pods -n external-secrets
 kubectl get secretstore,externalsecret -n demo
 kubectl get secret db-secret -n demo
-kubectl get pod -n demo -l app=secret-reader
+kubectl logs -n demo deploy/secret-reader
 ```
 
-## 10. Nhóm Supply Chain: Trivy, Cosign, Policy Controller
+## 9. Supply Chain: Trivy, Cosign, Policy Controller
 
-Kiến thức slide:
+Mục tiêu:
 
-- Image không scan có thể chứa CVE.
-- Image không ký thì cluster không biết image do ai build.
-- CI nên scan image trước khi push.
-- Image pass scan thì ký bằng Cosign.
-- Admission controller verify chữ ký trước khi cho chạy.
-
-### `.github/workflows/build-push.yml`
-
-Workflow CI/CD.
-
-Các việc chính:
-
-1. Checkout repo.
-2. Tính semantic version.
-3. Login GHCR.
-4. Build image local.
-5. Trivy scan image.
-6. Upload SARIF report.
-7. Build và push image lên GHCR.
-8. Cài Cosign.
-9. Ký image bằng Cosign keyless.
-10. Update `app-api/rollout.yaml` sang tag mới.
-11. Commit/push tag mới.
-12. Tạo Git tag.
-
-Quyền quan trọng:
-
-```yaml
-id-token: write
+```text
+Trivy scan -> Cosign sign -> Admission verify
 ```
 
-Tác dụng:
+File:
 
-- Cho phép Cosign keyless dùng GitHub OIDC để ký image.
-- Không cần lưu private key dài hạn.
+- `.github/workflows/build-push.yml`
+- `signing/cosign.pub`
+- `policies/cluster-image-policy.yaml`
+- `argocd/apps/policy-controller.yaml`
+- `argocd/apps/policies.yaml`
+- `policies/README.md`
 
-### `policies/cluster-image-policy.yaml`
+### GitHub Actions
 
-Tạo ClusterImagePolicy.
+Workflow làm các việc chính:
 
-Tác dụng:
+1. Build image từ `src/api`.
+2. Scan image bằng Trivy.
+3. Fail nếu có CVE `HIGH` hoặc `CRITICAL`.
+4. Push image lên GHCR.
+5. Ký image bằng Cosign key-pair.
+6. Update `app-api/rollout.yaml`.
+7. Commit version mới và tạo Git tag.
 
-- Chỉ áp dụng image:
+Đoạn ký image:
+
+```bash
+cosign sign --key env://COSIGN_PRIVATE_KEY "$tag"
+```
+
+### ClusterImagePolicy
+
+`policies/cluster-image-policy.yaml` chỉ tin image:
 
 ```text
 ghcr.io/nguyenha0112/w10-api**
 ```
 
-- Chỉ tin chữ ký đến từ GitHub Actions workflow:
+và verify bằng public key:
 
 ```text
-build-push.yml@refs/heads/main
+signing/cosign.pub
 ```
 
-### `policies/README.md`
-
-Ghi chú cách bật enforcement:
+Policy Controller chỉ enforce namespace có label:
 
 ```powershell
 kubectl label namespace demo policy.sigstore.dev/include=true --overwrite
 ```
 
-Quan trọng:
+Lưu ý: chỉ bật label sau khi image đã được ký, nếu không rollout có thể bị reject.
 
-Chỉ gắn label này sau khi image đã được CI ký. Nếu gắn trước, app `api` có thể bị reject khi rollout lại.
+## 10. Challenge payments tenant
 
-### `signing/cosign.pub`
+Phần này đáp ứng yêu cầu onboard team `payments` theo hướng multi-tenant.
 
-Ghi chú về signing.
+File:
 
-Repo hiện dùng Cosign keyless nên không có public/private key dài hạn.
+- `tenants/payments/namespace.yaml`
+- `tenants/payments/rbac.yaml`
+- `tenants/payments/quota-limitrange.yaml`
+- `tenants/payments/networkpolicies.yaml`
+- `tenants/payments/README.md`
+- `apps/payments/deployment.yaml`
+- `apps/payments/service.yaml`
+- `apps/payments/README.md`
+- `argocd/apps/payments.yaml`
+- `argocd/apps/payments-app.yaml`
 
-Nếu giảng viên yêu cầu key-based signing, cần:
+### Namespace
+
+Namespace `payments` có label:
+
+```yaml
+policy.sigstore.dev/include: "true"
+```
+
+Nghĩa là image signature policy cũ tự áp dụng cho team mới.
+
+### RBAC payments
+
+User:
+
+```text
+payments-dev
+```
+
+Được phép thao tác workload trong namespace `payments`, nhưng không được:
+
+- tạo workload trong `demo`
+- đọc `secrets`
+- sửa `rolebindings`
+
+Kiểm tra:
 
 ```powershell
-cosign generate-key-pair
+kubectl auth can-i create deploy -n payments --as payments-dev
+kubectl auth can-i create deploy -n demo --as payments-dev
+kubectl auth can-i get secrets -n payments --as payments-dev
+kubectl auth can-i create rolebindings -n payments --as payments-dev
 ```
 
-Sau đó:
-
-- Commit `cosign.pub`.
-- Lưu `cosign.key` và `COSIGN_PASSWORD` trong GitHub Secrets.
-
-## 11. Nhóm runbooks
-
-### `runbooks/secret-rotation.md`
-
-Hướng dẫn rotate secret bằng ESO.
-
-Tác dụng:
-
-- Cách đổi value trong fake SecretStore.
-- Cách kiểm tra Kubernetes Secret đổi.
-- Cách kiểm tra pod không restart.
-
-### `runbooks/supply-chain.md`
-
-Hướng dẫn kiểm tra supply chain.
-
-Tác dụng:
-
-- Kiểm tra GitHub Actions.
-- Bật namespace label cho policy-controller.
-- Test image unsigned bị reject.
-- Test image signed được chạy.
-
-### `runbooks/adr-cve-exception.md`
-
-Mẫu ADR cho ngoại lệ CVE.
-
-Tác dụng:
-
-- Không tắt Trivy scan toàn cục.
-- Nếu CVE chưa fix được thì tạo exception có thời hạn.
-- Ghi rõ CVE ID, image, lý do, mitigation và expiry.
-
-## 12. Tuần này đã làm thêm gì so với repo ban đầu?
-
-Repo ban đầu chủ yếu có:
+Kỳ vọng:
 
 ```text
-app-api/
-app-analysis/
-app-alert/
-app-common/
-argocd/
-src/api/
+yes
+no
+no
+no
 ```
 
-Tức là nền tảng W9/W10 cũ: rollout, monitoring, alert, API.
+### ResourceQuota và LimitRange
 
-Tuần này thêm các nhóm sau:
-
-### Thêm RBAC
+File:
 
 ```text
-rbac/roles.yaml
-rbac/rolebindings.yaml
-argocd/apps/rbac.yaml
+tenants/payments/quota-limitrange.yaml
 ```
 
 Tác dụng:
 
-- Phân quyền 3 user.
-- Không còn "ai cũng admin".
+- `ResourceQuota`: đặt ngân sách tổng CPU/RAM/pod/service.
+- `LimitRange`: cấp default request/limit cho container thiếu khai báo.
 
-### Thêm Gatekeeper Admission Policy
+### NetworkPolicy
+
+File:
 
 ```text
-gatekeeper/templates/
-gatekeeper/constraints/
-argocd/apps/gatekeeper.yaml
-argocd/apps/gatekeeper-templates.yaml
-argocd/apps/gatekeeper-constraints.yaml
+tenants/payments/networkpolicies.yaml
 ```
+
+Có 2 policy:
+
+- `default-deny-ingress`: chặn traffic vào payments nếu không được allow.
+- `restrict-egress`: chỉ cho egress cùng namespace và DNS.
+
+Lưu ý: NetworkPolicy chỉ enforce nếu CNI hỗ trợ, ví dụ Calico.
+
+### App payments
+
+App mẫu:
+
+```text
+apps/payments/
+```
+
+Deployment `payments-api` dùng image:
+
+```text
+ghcr.io/nguyenha0112/w10-api:0.0.1
+```
+
+Image này phải được ký bằng workflow Cosign key-pair hiện tại trước khi namespace `payments` enforce signature policy.
+
+## 11. Runbooks và ADR
+
+File:
+
+- `runbooks/secret-rotation.md`
+- `runbooks/supply-chain.md`
+- `runbooks/adr-cve-exception.md`
 
 Tác dụng:
 
-- Chặn manifest xấu ở API server.
-- Ép workload có tiêu chuẩn bảo mật.
+- `secret-rotation.md`: hướng dẫn rotate secret bằng ESO.
+- `supply-chain.md`: hướng dẫn kiểm tra Trivy/Cosign/Policy Controller.
+- `adr-cve-exception.md`: mẫu ngoại lệ CVE có thời hạn, không tắt scan toàn cục.
 
-### Thêm ESO
+## 12. Checklist kiểm tra khi có cluster
 
-```text
-eso/
-argocd/apps/eso.yaml
-argocd/apps/eso-config.yaml
-```
-
-Tác dụng:
-
-- Không để secret thật trong Git.
-- Secret tự sync vào Kubernetes.
-- Chứng minh rotate không restart pod.
-
-### Thêm Supply Chain Security
-
-```text
-policies/
-signing/
-argocd/apps/policy-controller.yaml
-argocd/apps/policies.yaml
-.github/workflows/build-push.yml
-```
-
-Tác dụng:
-
-- CI scan CVE bằng Trivy.
-- CI ký image bằng Cosign.
-- Admission verify image đã ký.
-
-### Thêm runbooks
-
-```text
-runbooks/
-README_LAB_STEPS.md
-TONG_HOP_W10_LAB.md
-```
-
-Tác dụng:
-
-- Có tài liệu để vận hành và giải thích bài.
-- Có ADR cho ngoại lệ CVE.
-
-## 13. Cách hiểu toàn bộ flow từ đầu đến cuối
-
-### Flow deploy app
-
-```text
-src/api/app.py
-        ↓ Dockerfile
-GitHub Actions build image
-        ↓
-Trivy scan
-        ↓
-Cosign sign
-        ↓
-Push image lên GHCR
-        ↓
-Update app-api/rollout.yaml
-        ↓
-ArgoCD sync app-api
-        ↓
-Argo Rollouts deploy API
-        ↓
-Prometheus scrape /metrics
-        ↓
-AnalysisTemplate kiểm tra canary
-```
-
-### Flow RBAC
-
-```text
-rbac/roles.yaml
-rbac/rolebindings.yaml
-        ↓
-ArgoCD sync
-        ↓
-Kubernetes tạo Role/Binding
-        ↓
-kubectl auth can-i kiểm tra quyền
-```
-
-### Flow admission policy
-
-```text
-gatekeeper/templates/
-        ↓
-Tạo loại policy mới
-        ↓
-gatekeeper/constraints/
-        ↓
-Bật policy thật
-        ↓
-kubectl apply manifest
-        ↓
-API server gọi Gatekeeper webhook
-        ↓
-Pass hoặc reject
-```
-
-### Flow secret
-
-```text
-SecretStore fake-store
-        ↓
-ExternalSecret db-secret
-        ↓
-ESO tạo Kubernetes Secret db-secret
-        ↓
-secret-reader mount Secret bằng volume
-        ↓
-Secret đổi thì file trong pod đổi, pod không restart
-```
-
-### Flow image signature
-
-```text
-GitHub Actions
-        ↓
-Cosign keyless sign image
-        ↓
-Signature lưu ở registry
-        ↓
-Policy Controller kiểm tra khi deploy
-        ↓
-Image signed thì pass, unsigned thì reject
-```
-
-## 14. Checklist tự kiểm
-
-Khi Docker/minikube chạy, dùng:
+ArgoCD:
 
 ```powershell
 kubectl get applications -n argocd
-kubectl get pods -n demo
-kubectl get rollout -n demo
-kubectl get analysisrun -n demo
-kubectl get pods -n monitoring
-kubectl get pods -n gatekeeper-system
-kubectl get pods -n external-secrets
-kubectl get pods -n cosign-system
 ```
 
 RBAC:
@@ -1173,110 +450,54 @@ kubectl auth can-i delete nodes --as carol
 Gatekeeper:
 
 ```powershell
+kubectl get pods -n gatekeeper-system
 kubectl get constrainttemplates
-kubectl get k8sdisallowlatesttag,k8srequiredcontainerlimits,k8sdisallowrootuser,k8sdisallowhostnetwork,k8smaxreplicas
+kubectl get k8sdisallowlatesttag
+kubectl get k8srequiredcontainerlimits
+kubectl get k8sdisallowrootuser
+kubectl get k8sdisallowhostnetwork
+kubectl get k8smaxreplicas
 ```
 
 ESO:
 
 ```powershell
+kubectl get pods -n external-secrets
 kubectl get secretstore,externalsecret -n demo
 kubectl get secret db-secret -n demo
-kubectl logs -n demo -l app=secret-reader
+kubectl logs -n demo deploy/secret-reader
 ```
 
 Supply chain:
 
 ```powershell
-kubectl get clusterimagepolicy
 kubectl get pods -n cosign-system
+kubectl get clusterimagepolicy
+kubectl run unsigned-test -n demo --image=nginx:1.27 --dry-run=server
 ```
 
-ArgoCD UI:
+Payments:
 
 ```powershell
-kubectl -n argocd port-forward svc/argocd-server 8080:443
+kubectl get ns payments --show-labels
+kubectl get resourcequota,limitrange,networkpolicy -n payments
+kubectl get deploy,svc -n payments
+kubectl auth can-i create deploy -n payments --as payments-dev
+kubectl auth can-i create deploy -n demo --as payments-dev
+kubectl auth can-i get secrets -n payments --as payments-dev
+kubectl auth can-i create rolebindings -n payments --as payments-dev
 ```
 
-Mở:
+## 13. Checklist trước khi nộp
 
-```text
-https://localhost:8080
-```
+Trước khi nộp, cần nhớ:
 
-## 15. Những điểm dễ nhầm
+- Không commit `signing/cosign.key`.
+- GitHub repo phải có secrets `COSIGN_PRIVATE_KEY` và `COSIGN_PASSWORD`.
+- ESO đang dùng AWS Secrets Manager thật; cần tạo secret `/w10/demo/db-password` trên AWS và tạo Kubernetes Secret `aws-credentials` thủ công.
+- NetworkPolicy cần CNI hỗ trợ như Calico để test chặn traffic thật.
+- Namespace `payments` đã bật `policy.sigstore.dev/include=true`, nên image phải signed trước khi app sync xanh.
 
-### `can-i` không phải lệnh riêng
+## 14. Một câu giải thích toàn bộ project
 
-Sai:
-
-```powershell
-can-i create deploy -n demo --as alice
-```
-
-Đúng:
-
-```powershell
-kubectl auth can-i create deploy -n demo --as alice
-```
-
-### `AnalysisRun` không phải lúc nào cũng có
-
-`kubectl get analysisrun -n demo` có thể trả:
-
-```text
-No resources found
-```
-
-Điều này bình thường nếu mới initial deploy. AnalysisRun thường sinh khi rollout có update/canary mới.
-
-### Không bật signature policy quá sớm
-
-Không label namespace `demo` trước khi image đã được ký:
-
-```powershell
-kubectl label namespace demo policy.sigstore.dev/include=true --overwrite
-```
-
-Nếu bật quá sớm, app có thể bị reject khi rollout lại.
-
-### Không commit secret thật
-
-Không commit:
-
-```text
-AWS access key
-Gmail app password
-cosign private key
-database password thật
-```
-
-Chỉ commit:
-
-```text
-manifest
-template
-example
-public key hoặc keyless policy
-runbook
-```
-
-## 16. Kết luận ngắn gọn
-
-Buổi sáng xây hàng rào trong cluster:
-
-```text
-RBAC = ai được làm gì
-Gatekeeper = manifest có hợp lệ không
-```
-
-Buổi chiều bảo vệ secret và image:
-
-```text
-ESO = secret không nằm trong Git, tự sync vào cluster
-Trivy = scan CVE trước khi push/deploy
-Cosign = ký image để biết image đến từ pipeline tin cậy
-Policy Controller = admission verify chữ ký image
-```
-
-Toàn bộ repo biến thành một platform GitOps nhỏ: push Git là thay đổi cluster, nhưng cluster vẫn có các lớp kiểm soát quyền, policy, secret và supply chain.
+Project này là một platform Kubernetes quản lý bằng GitOps: RBAC kiểm soát ai được làm gì, Gatekeeper chặn manifest xấu, ESO quản lý secret không commit vào Git, Trivy/Cosign/Policy Controller bảo vệ image supply chain, và tenant `payments` được cô lập bằng namespace, RBAC, quota, limit và network policy.

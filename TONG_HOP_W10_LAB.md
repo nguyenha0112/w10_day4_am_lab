@@ -2,6 +2,538 @@
 
 File này giải thích toàn bộ repo lab W10: cấu trúc thư mục, tác dụng từng file, tuần này đã làm thêm gì, và kiến thức trong hai slide buổi sáng/buổi chiều.
 
+## 0. Kiến thức cần hiểu trước
+
+Trước khi nhìn vào từng file YAML, cần hiểu các khái niệm chính trong lab. Phần này trả lời 4 câu hỏi:
+
+```text
+Nó là gì?
+Dùng để làm gì?
+Không có nó thì sao?
+Ví dụ trong repo này là gì?
+```
+
+### Kubernetes cluster
+
+Kubernetes cluster là nơi chạy ứng dụng container.
+
+Trong lab này, cluster là `minikube` chạy trên máy local.
+
+Dùng để làm gì:
+
+- Chạy pod API.
+- Chạy ArgoCD.
+- Chạy Prometheus, Gatekeeper, ESO, Policy Controller.
+- Thực thi RBAC và admission policy.
+
+Không có nó thì sao:
+
+- File YAML chỉ nằm trên GitHub, không có nơi nào apply.
+- Không có pod, service, rollout, secret thật để kiểm tra.
+
+Ví dụ:
+
+```powershell
+kubectl get nodes
+kubectl get pods -A
+```
+
+### Namespace
+
+Namespace là "phòng riêng" trong Kubernetes cluster.
+
+Nó giúp chia tài nguyên theo nhóm, theo team, theo hệ thống.
+
+Dùng để làm gì:
+
+- Tách app khỏi hệ thống.
+- Tách monitoring khỏi workload.
+- Tách security controller khỏi app.
+- Giới hạn quyền RBAC theo namespace.
+- Áp policy có chọn lọc.
+
+Không có namespace thì sao:
+
+- Mọi thứ nằm chung một chỗ, khó quản lý.
+- Dễ cấp quyền quá rộng.
+- Dễ xóa nhầm tài nguyên hệ thống.
+- Khó biết resource thuộc phần nào.
+
+Các namespace chính trong lab:
+
+```text
+argocd
+demo
+monitoring
+argo-rollouts
+gatekeeper-system
+external-secrets
+cosign-system
+kube-system
+default
+```
+
+Ý nghĩa từng namespace:
+
+```text
+argocd
+```
+
+Chứa ArgoCD server, repo-server, application-controller.
+
+Tác dụng: ArgoCD đọc GitHub repo và sync manifest vào cluster.
+
+Nếu namespace này lỗi: ArgoCD UI mất, app không tự sync.
+
+```text
+demo
+```
+
+Chứa app API chính của bài lab.
+
+Tác dụng: đây là namespace workload để test Rollout, RBAC, Gatekeeper, ESO, ServiceMonitor.
+
+Nếu namespace này chưa có: API, Secret, ExternalSecret, ServiceMonitor không deploy được.
+
+```text
+monitoring
+```
+
+Chứa Prometheus, Alertmanager, Grafana.
+
+Tác dụng: thu metrics, phân tích success rate, gửi alert email.
+
+Nếu namespace này lỗi: AnalysisTemplate không query được metric, alert không gửi được.
+
+```text
+argo-rollouts
+```
+
+Chứa Argo Rollouts controller.
+
+Tác dụng: điều khiển resource `Rollout`, tạo ReplicaSet, AnalysisRun, canary deploy.
+
+Nếu namespace này lỗi: resource `Rollout` có thể tồn tại nhưng controller không xử lý rollout/canary.
+
+```text
+gatekeeper-system
+```
+
+Chứa OPA Gatekeeper controller và webhook.
+
+Tác dụng: admission policy, chặn manifest xấu.
+
+Nếu namespace này lỗi: policy không enforce, image latest/root/no-limits có thể lọt vào cluster.
+
+```text
+external-secrets
+```
+
+Chứa External Secrets Operator.
+
+Tác dụng: sync secret từ nguồn ngoài vào Kubernetes Secret.
+
+Nếu namespace này lỗi: `ExternalSecret` không tạo/cập nhật được `db-secret`.
+
+```text
+cosign-system
+```
+
+Chứa Sigstore Policy Controller.
+
+Tác dụng: verify chữ ký image khi admission.
+
+Nếu namespace này lỗi: image signature policy không enforce được.
+
+```text
+kube-system
+```
+
+Namespace hệ thống của Kubernetes.
+
+Tác dụng: chứa CoreDNS, kube-proxy và các thành phần hệ thống.
+
+Không nên deploy app thường vào đây.
+
+```text
+default
+```
+
+Namespace mặc định nếu bạn không chỉ định `-n`.
+
+Trong lab này gần như không nên dùng `default`, vì workload chính nằm ở `demo`.
+
+### Pod
+
+Pod là đơn vị chạy nhỏ nhất trong Kubernetes.
+
+Một pod chứa một hoặc nhiều container.
+
+Dùng để làm gì:
+
+- Chạy API.
+- Chạy controller như ArgoCD, Gatekeeper, ESO.
+- Chạy Prometheus, Alertmanager.
+
+Không có pod thì sao:
+
+- Không có process/container nào chạy thật.
+
+Ví dụ:
+
+```powershell
+kubectl get pods -n demo
+kubectl get pods -n argocd
+```
+
+### Deployment
+
+Deployment quản lý số lượng pod thường.
+
+Dùng để làm gì:
+
+- Đảm bảo luôn có số pod mong muốn.
+- Nếu pod chết thì tạo pod mới.
+- Update image theo kiểu rolling update.
+
+Không có Deployment thì sao:
+
+- Tự tạo pod thủ công thì pod chết sẽ không tự hồi phục tốt.
+- Khó update version.
+
+Ví dụ trong repo:
+
+```text
+eso/secret-reader.yaml
+```
+
+### Rollout
+
+Rollout là resource của Argo Rollouts, nâng cấp từ Deployment.
+
+Dùng để làm gì:
+
+- Canary deploy.
+- Blue/green deploy.
+- Tích hợp AnalysisTemplate để kiểm tra metric.
+- Tự rollback nếu metric xấu.
+
+Không có Rollout thì sao:
+
+- Chỉ có rolling update thường.
+- Không có canary 10%, 50%, 100%.
+- Không có analysis tự động bằng Prometheus.
+
+Ví dụ trong repo:
+
+```text
+app-api/rollout.yaml
+```
+
+### Service
+
+Service tạo địa chỉ ổn định cho pod.
+
+Pod có thể đổi tên/IP, nhưng Service giữ endpoint ổn định.
+
+Dùng để làm gì:
+
+- Cho app khác gọi API.
+- Cho Prometheus scrape metrics.
+
+Không có Service thì sao:
+
+- Pod vẫn chạy nhưng khó truy cập ổn định.
+- ServiceMonitor không biết scrape ở đâu.
+
+Ví dụ:
+
+```text
+app-api/service.yaml
+```
+
+### ServiceMonitor
+
+ServiceMonitor là resource của Prometheus Operator.
+
+Dùng để làm gì:
+
+- Nói Prometheus scrape service nào.
+- Chỉ định path `/metrics`, port, interval.
+
+Không có ServiceMonitor thì sao:
+
+- Prometheus không thu metric API.
+- AnalysisTemplate có thể không có dữ liệu để đánh giá canary.
+
+Ví dụ:
+
+```text
+app-api/servicemonitor.yaml
+```
+
+### ConfigMap và Secret
+
+ConfigMap dùng cho cấu hình không nhạy cảm.
+
+Secret dùng cho dữ liệu nhạy cảm như password/token.
+
+Dùng để làm gì:
+
+- ConfigMap: config thường.
+- Secret: password, API key, token.
+
+Không có Secret thì sao:
+
+- Dễ hard-code password vào manifest.
+- Dễ lộ credential trong Git.
+
+Lưu ý:
+
+Kubernetes Secret mặc định chỉ base64, không phải encryption mạnh. Vì vậy slide buổi chiều dùng ESO để không commit secret thật vào Git.
+
+### External Secrets Operator
+
+ESO là controller sync secret từ nguồn ngoài vào Kubernetes.
+
+Dùng để làm gì:
+
+- Secret thật nằm ở AWS Secrets Manager, Vault, hoặc provider khác.
+- Kubernetes chỉ nhận bản sync.
+- Có thể refresh định kỳ.
+
+Không có ESO thì sao:
+
+- Dễ commit Secret plaintext vào Git.
+- Rotate secret thủ công.
+- Dễ phải restart pod nếu app dùng env var.
+
+Ví dụ trong repo:
+
+```text
+eso/secret-store.yaml
+eso/external-secret.yaml
+```
+
+Trong lab local, repo dùng provider `fake` để mô phỏng nguồn secret ngoài mà không cần AWS thật.
+
+### RBAC
+
+RBAC là Role-Based Access Control.
+
+Nó trả lời câu hỏi:
+
+```text
+Ai được làm gì?
+```
+
+Dùng để làm gì:
+
+- Giới hạn quyền user.
+- Tránh ai cũng là admin.
+- Tách quyền developer, SRE, viewer.
+
+Không có RBAC thì sao:
+
+- User có thể xóa namespace, sửa secret, xóa node.
+- Rất nguy hiểm trong cluster dùng chung.
+
+Ví dụ trong repo:
+
+```text
+rbac/roles.yaml
+rbac/rolebindings.yaml
+```
+
+Ví dụ test:
+
+```powershell
+kubectl auth can-i create deploy -n demo --as alice
+```
+
+### Admission Controller
+
+Admission Controller kiểm tra request trước khi resource được lưu vào cluster.
+
+Nó trả lời câu hỏi:
+
+```text
+Manifest này có hợp lệ không?
+```
+
+Dùng để làm gì:
+
+- Chặn image `latest`.
+- Bắt buộc resource limits.
+- Cấm root user.
+- Cấm hostNetwork.
+- Verify image signature.
+
+Không có Admission Controller thì sao:
+
+- Dù user có quyền tạo Deployment, họ vẫn có thể tạo manifest nguy hiểm.
+- RBAC chỉ kiểm "ai", không kiểm "manifest tốt hay xấu".
+
+### Gatekeeper
+
+Gatekeeper là admission controller dựa trên OPA/Rego.
+
+Dùng để làm gì:
+
+- Viết policy-as-code.
+- Chặn resource vi phạm rule.
+
+Không có Gatekeeper thì sao:
+
+- Không enforce được các rule như no latest, require limits, no root.
+
+Ví dụ trong repo:
+
+```text
+gatekeeper/templates/
+gatekeeper/constraints/
+```
+
+### ConstraintTemplate và Constraint
+
+Trong Gatekeeper có hai phần:
+
+```text
+ConstraintTemplate = định nghĩa logic policy
+Constraint         = bật policy đó với phạm vi cụ thể
+```
+
+Ví dụ:
+
+```text
+gatekeeper/templates/k8srequiredcontainerlimits.yaml
+gatekeeper/constraints/require-container-limits.yaml
+```
+
+Không có ConstraintTemplate:
+
+- Cluster chưa biết loại policy đó là gì.
+
+Không có Constraint:
+
+- Logic có rồi nhưng chưa bật enforce.
+
+### Trivy
+
+Trivy là công cụ scan lỗ hổng bảo mật trong image.
+
+Dùng để làm gì:
+
+- Scan CVE trước khi push/deploy.
+- Fail CI nếu có CVE HIGH/CRITICAL.
+
+Không có Trivy thì sao:
+
+- Image có lỗ hổng vẫn được đưa lên registry và chạy trong cluster.
+
+Ví dụ trong repo:
+
+```text
+.github/workflows/build-push.yml
+```
+
+### Cosign
+
+Cosign dùng để ký image container.
+
+Dùng để làm gì:
+
+- Chứng minh image được build bởi pipeline tin cậy.
+- Signature lưu ở registry.
+- Admission controller có thể verify trước khi chạy.
+
+Không có Cosign thì sao:
+
+- Cluster không biết image do ai build.
+- Ai push image cùng tên/tag cũng khó kiểm soát.
+
+Repo này dùng Cosign keyless với GitHub OIDC, nên không cần commit private key.
+
+### Sigstore Policy Controller
+
+Policy Controller là admission controller verify chữ ký image.
+
+Dùng để làm gì:
+
+- Chỉ cho chạy image đã ký.
+- Có thể chỉ enforce namespace được label.
+
+Không có nó thì sao:
+
+- CI có ký image nhưng cluster không kiểm tra.
+- Image unsigned vẫn có thể chạy.
+
+Ví dụ trong repo:
+
+```text
+argocd/apps/policy-controller.yaml
+policies/cluster-image-policy.yaml
+```
+
+### ArgoCD
+
+ArgoCD là GitOps controller.
+
+Dùng để làm gì:
+
+- Đọc YAML từ GitHub.
+- So sánh Git với cluster.
+- Tự apply để cluster giống Git.
+
+Không có ArgoCD thì sao:
+
+- Phải `kubectl apply` tay.
+- Dễ lệch giữa Git và cluster.
+- Khó audit ai thay đổi gì.
+
+Ví dụ:
+
+```text
+argocd/root.yaml
+argocd/apps/*.yaml
+```
+
+### GitHub Actions
+
+GitHub Actions là CI/CD chạy trên GitHub.
+
+Dùng để làm gì:
+
+- Build Docker image.
+- Scan Trivy.
+- Push image lên GHCR.
+- Sign image bằng Cosign.
+- Update rollout tag.
+
+Không có GitHub Actions thì sao:
+
+- Phải build/push/sign thủ công.
+- Dễ quên scan hoặc ký image.
+
+### GHCR
+
+GHCR là GitHub Container Registry.
+
+Dùng để làm gì:
+
+- Lưu Docker image.
+- Kubernetes pull image từ đây.
+
+Ví dụ:
+
+```text
+ghcr.io/nguyenha0112/w10-api:0.0.1
+```
+
+Không có registry thì sao:
+
+- Cluster không có nơi pull image.
+
 ## 1. Repo này dùng để làm gì?
 
 Repo này là một repo GitOps cho Kubernetes.

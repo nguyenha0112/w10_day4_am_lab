@@ -281,17 +281,17 @@ File `argocd/apps/eso-config.yaml`:
 
 File `eso/secret-store.yaml`:
 
-- Tao `SecretStore` ten `aws-store`.
-- Dung provider `aws` de doc AWS Secrets Manager.
-- Region hien tai: `ap-southeast-1`.
-- AWS secret key: `/w10/demo/db-password`.
-- AWS credential khong commit vao Git, tao bang Kubernetes Secret `aws-credentials`.
+- Tao `SecretStore` ten `fake-store`.
+- Dung provider `fake` de mo phong external secret store tren minikube.
+- Key gia lap: `/w10/demo/db-password`.
+- Value hien tai: `initial-db-password`.
+- Version hien tai: `v1`.
 
 File `eso/external-secret.yaml`:
 
 - Tao `ExternalSecret` ten `db-secret`.
 - `refreshInterval: 30s`, tot hon target slide `< 60s`.
-- Doc tu `aws-store`.
+- Doc tu `fake-store`.
 - Tao Kubernetes Secret ten `db-secret`.
 - Map remote key `/w10/demo/db-password` vao key `password`.
 
@@ -304,13 +304,13 @@ File `eso/secret-reader.yaml`:
 
 ### Diem can hieu ro
 
-Trong slide, production case la AWS Secrets Manager + IRSA. Trong project cua ban, ESO dang dung AWS Secrets Manager voi credential luu trong Kubernetes Secret `aws-credentials`.
+Trong slide, production case la AWS Secrets Manager + IRSA. Trong project cua ban, lab local dung `fake` provider de chay nhanh va on dinh tren minikube. Kien thuc la giong nhau o flow:
 
 ```text
-AWS Secrets Manager -> ESO controller -> Kubernetes Secret -> Pod mount volume
+External store -> ESO controller -> Kubernetes Secret -> Pod mount volume
 ```
 
-Neu dung EKS that, co the thay credential secret bang IRSA de khong can access key dai han.
+Neu dung EKS/AWS that, co the thay fake provider bang AWS Secrets Manager + IRSA.
 
 ### Lenh tu kiem tra
 
@@ -470,7 +470,7 @@ File `policies/README.md`:
 | Yeu cau slide | Project cua ban | Trang thai |
 |---|---|---|
 | ESO controller | `argocd/apps/eso.yaml` | Co |
-| SecretStore | `eso/secret-store.yaml` | Co, dung AWS Secrets Manager |
+| SecretStore | `eso/secret-store.yaml` | Co, dung fake provider cho lab local |
 | ExternalSecret | `eso/external-secret.yaml` | Co |
 | Rotate < 60s | `refreshInterval: 30s` | Co |
 | Pod mount Secret qua volume | `eso/secret-reader.yaml` | Co |

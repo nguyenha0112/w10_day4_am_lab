@@ -17,7 +17,7 @@ Repo hiện đã đủ các phần chính:
 | GitOps App of Apps | Đủ | Quản lý toàn bộ platform từ Git, ArgoCD tự sync các app con vào cluster | `argocd/root.yaml`, `argocd/apps/*.yaml` |
 | RBAC 3 user | Đủ | Phân quyền ai được làm gì; giới hạn `alice`, `bob`, `carol` theo vai trò | `rbac/roles.yaml`, `rbac/rolebindings.yaml` |
 | Gatekeeper Admission | Đủ | Chặn manifest xấu trước khi vào cluster, ví dụ `:latest`, thiếu limits, chạy root | `gatekeeper/templates/`, `gatekeeper/constraints/` |
-| ESO secret rotation | Đủ, dùng AWS Secrets Manager | Sync secret từ AWS vào Kubernetes Secret, chứng minh rotate không cần restart pod | `eso/`, `argocd/apps/eso*.yaml` |
+| ESO secret rotation | Đủ, dùng fake provider cho lab local | Sync secret từ SecretStore vào Kubernetes Secret, chứng minh rotate không cần restart pod | `eso/`, `argocd/apps/eso*.yaml` |
 | Trivy scan | Đủ | Scan CVE trong image ở CI, fail pipeline nếu có lỗi HIGH/CRITICAL | `.github/workflows/build-push.yml` |
 | Cosign signing | Đủ, dùng key-pair | Ký image sau khi build/scan để chứng minh image đến từ pipeline tin cậy | `.github/workflows/build-push.yml`, `signing/cosign.pub` |
 | Policy Controller verify image | Đủ | Admission kiểm tra chữ ký image, reject image chưa ký hoặc không đúng public key | `argocd/apps/policy-controller.yaml`, `policies/cluster-image-policy.yaml` |
@@ -26,9 +26,17 @@ Repo hiện đã đủ các phần chính:
 
 ## 2. Phương án thay thế cần báo rõ
 
-Có 1 điểm cần báo rõ khi trình bày:
+Có 2 điểm cần báo rõ khi trình bày:
 
-1. Cosign dùng key-pair, không dùng keyless
+1. ESO dùng `fake` provider cho lab local
+
+Trong production có thể dùng AWS Secrets Manager, nhưng để chạy nhanh/ổn định trên minikube, project dùng ESO `fake` provider. Flow kiến thức vẫn đúng:
+
+```text
+External secret store -> ESO -> Kubernetes Secret -> Pod mount volume
+```
+
+2. Cosign dùng key-pair, không dùng keyless
 
 Project hiện dùng Cosign key-pair:
 
@@ -212,7 +220,7 @@ App API hiện hợp lệ với Gatekeeper:
 
 ## 8. ESO Secret Rotation
 
-ESO dùng để không commit secret thật vào Git. Project hiện dùng AWS Secrets Manager thật.
+ESO dùng để không commit secret thật vào Git. Project hiện dùng `fake` provider để mô phỏng external secret store trong lab local.
 
 File:
 
@@ -225,27 +233,18 @@ File:
 Flow:
 
 ```text
-AWS Secrets Manager -> SecretStore aws-store -> ExternalSecret -> Kubernetes Secret db-secret -> pod secret-reader mount volume
+fake SecretStore -> ExternalSecret -> Kubernetes Secret db-secret -> pod secret-reader mount volume
 ```
 
 Chi tiết:
 
-- `SecretStore` tên `aws-store`.
-- AWS region: `ap-southeast-1`.
-- AWS Secrets Manager key: `/w10/demo/db-password`.
+- `SecretStore` tên `fake-store`.
+- Remote key mô phỏng: `/w10/demo/db-password`.
+- Value hiện tại: `initial-db-password`.
+- Version hiện tại: `v1`.
 - `ExternalSecret` tạo Kubernetes Secret tên `db-secret`.
 - `refreshInterval: 30s`, đạt yêu cầu rotate dưới 60 giây.
 - `secret-reader` mount Secret vào `/etc/db` và đọc file mỗi 10 giây.
-
-Trước khi ESO sync được, cần tạo Kubernetes Secret chứa AWS credential:
-
-```powershell
-kubectl create secret generic aws-credentials -n demo `
-  --from-literal=access-key-id="YOUR_AWS_ACCESS_KEY_ID" `
-  --from-literal=secret-access-key="YOUR_AWS_SECRET_ACCESS_KEY"
-```
-
-Không commit AWS credential vào Git.
 
 Kiểm tra:
 
@@ -494,7 +493,7 @@ Trước khi nộp, cần nhớ:
 
 - Không commit `signing/cosign.key`.
 - GitHub repo phải có secrets `COSIGN_PRIVATE_KEY` và `COSIGN_PASSWORD`.
-- ESO đang dùng AWS Secrets Manager thật; cần tạo secret `/w10/demo/db-password` trên AWS và tạo Kubernetes Secret `aws-credentials` thủ công.
+- ESO đang dùng `fake` provider cho lab local; nếu chuyển production thì thay bằng AWS Secrets Manager/IRSA.
 - NetworkPolicy cần CNI hỗ trợ như Calico để test chặn traffic thật.
 - Namespace `payments` đã bật `policy.sigstore.dev/include=true`, nên image phải signed trước khi app sync xanh.
 

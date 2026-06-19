@@ -581,26 +581,11 @@ Tác dụng:
 
 - `eso.yaml`: cài External Secrets Operator.
 - `eso-config.yaml`: sync cấu hình secret trong thư mục `eso/`.
-- `secret-store.yaml`: dùng provider `aws` để đọc secret thật từ AWS Secrets Manager.
+- `secret-store.yaml`: dùng provider `fake` để mô phỏng nguồn secret bên ngoài khi chạy minikube.
 - `external-secret.yaml`: tạo Kubernetes Secret tên `db-secret`.
 - `secret-reader.yaml`: pod mount secret qua volume để chứng minh secret đổi mà pod không restart.
 
-Trước khi sync ESO, cần tạo AWS secret thật:
-
-```text
-Region: ap-southeast-1
-Secret name: /w10/demo/db-password
-```
-
-Và tạo Kubernetes Secret chứa AWS credential:
-
-```powershell
-kubectl create secret generic aws-credentials -n demo `
-  --from-literal=access-key-id="YOUR_AWS_ACCESS_KEY_ID" `
-  --from-literal=secret-access-key="YOUR_AWS_SECRET_ACCESS_KEY"
-```
-
-Không commit AWS credential vào Git.
+Với lab local, không cần AWS credential thật. Nếu chuyển production thì thay `fake` provider bằng AWS Secrets Manager/IRSA.
 
 Kiểm tra:
 
